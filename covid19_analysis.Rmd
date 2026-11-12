@@ -61,12 +61,12 @@ Reading the data, transforming it using pivot long
 ```{r}
 
 # population dataset
-population <- read_csv("UID_ISO_FIPS_LookUp_Table.csv", show_col_types = FALSE) |>
+population <- read_csv("data/UID_ISO_FIPS_LookUp_Table.csv", show_col_types = FALSE) |>
   filter(is.na(Province_State)) |>
   select(country = Country_Region, population = Population)
 
 # deaths dataset; using pivot longer, joining it with populations and European regions dictionary
-covid_eu <- read_csv("time_series_covid19_deaths_global.csv", show_col_types = FALSE) |>
+covid_eu <- read_csv("data/time_series_covid19_deaths_global.csv", show_col_types = FALSE) |>
   filter(is.na(`Province/State`), `Country/Region` %in% europe$country) |>
   select(-c(`Province/State`, Lat, Long)) |>
   pivot_longer(-`Country/Region`, names_to = "date", values_to = "deaths") |>

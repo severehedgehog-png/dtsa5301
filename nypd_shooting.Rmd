@@ -27,7 +27,7 @@ The dataset nypd_shooting.csv was downloaded from https://catalog.data.gov/datas
 ```{r}
 # import data as strings, we'll clean it later
 nypd_shooting <- read_csv(
-  "nypd_shooting.csv",
+  "data/nypd_shooting.csv",
   na = c("", "(null)", "UNKNOWN", "U"),
   col_types = cols(.default = col_character())
 )
