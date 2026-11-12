@@ -1,6 +1,5 @@
 ---
 title: "NYPD Shooting Analysis"
-author: "Oleg Korotkov"
 date: "2026-11-11"
 output: pdf_document
 ---
@@ -21,13 +20,15 @@ library(ggspatial)
 
 The dataset nypd_shooting.csv was downloaded from https://catalog.data.gov/dataset/archived_nypd-shooting-incident-data-historic
 
+The file is read directly from this GitHub repository (https://github.com/severehedgehog-png/dtsa5301), so an internet connection is needed to knit this document.
+
 
 ## Data load and initial analysis
 
 ```{r}
 # import data as strings, we'll clean it later
 nypd_shooting <- read_csv(
-  "data/nypd_shooting.csv",
+  "https://raw.githubusercontent.com/severehedgehog-png/dtsa5301/main/nypd_shooting.csv",
   na = c("", "(null)", "UNKNOWN", "U"),
   col_types = cols(.default = col_character())
 )
