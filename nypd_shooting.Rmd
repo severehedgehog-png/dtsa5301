@@ -1,0 +1,231 @@
+---
+title: "NYPD Shooting Analysis"
+author: "Oleg Korotkov"
+date: "2026-11-11"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# install.packages(c("ggspatial", "prettymapr", "rosm", "raster"))
+library(tidyverse)
+library(lubridate)
+library(ggspatial)
+
+```
+
+# New York Police Department Shooting incident analysis
+
+The dataset nypd_shooting.csv was downloaded from https://catalog.data.gov/dataset/archived_nypd-shooting-incident-data-historic
+
+
+## Data load and initial analysis
+
+```{r}
+# import data as strings, we'll clean it later
+nypd_shooting <- read_csv(
+  "nypd_shooting.csv",
+  na = c("", "(null)", "UNKNOWN", "U"),
+  col_types = cols(.default = col_character())
+)
+glimpse(nypd_shooting)
+
+
+# number of rows and unique incidents
+cat("rows:", nrow(nypd_shooting), " incidents:", n_distinct(nypd_shooting$INCIDENT_KEY), "\n")
+
+# Info about missing data values:
+print(colSums(is.na(nypd_shooting)))
+
+```
+
+## Data wrangeling
+
+Here we will remove the columns, we don't plan to use in our further visualization or modeling; then we adjust the data, change data types and add factor columns.
+
+```{r}
+# Age groups:
+age_levels <- c("<18", "18-24", "25-44", "45-64", "65+")
+
+nypd_clean <- nypd_shooting |> 
+  select(INCIDENT_KEY, OCCUR_DATE, OCCUR_TIME, BORO, PRECINCT,
+         STATISTICAL_MURDER_FLAG, VIC_AGE_GROUP, VIC_SEX, Latitude, Longitude) |> 
+    mutate(date   = mdy(OCCUR_DATE),
+           hour   = hour(hms(OCCUR_TIME)),
+           year   = year(date),
+           month  = month(date, label = TRUE),
+           wday   = wday(date, label = TRUE, week_start = 1),
+           fatal  = STATISTICAL_MURDER_FLAG == "true",
+           boro    = factor(str_to_title(BORO)),
+           vic_age = factor(if_else(VIC_AGE_GROUP %in% age_levels, VIC_AGE_GROUP, NA_character_),
+                            levels = age_levels),
+           vic_sex = factor(VIC_SEX),
+           lat = as.numeric(Latitude),
+           lon = as.numeric(Longitude),
+           period = case_when(hour >= 21 | hour < 6 ~ "night",
+                              hour < 12 ~ "morning",
+                              hour < 18 ~ "afternoon",
+                              TRUE ~ "evening")
+           ) |>
+  select(incident_key = INCIDENT_KEY, date, year, month, wday, hour, period,
+         boro, precinct = PRECINCT, fatal, vic_age, vic_sex, lat, lon)
+
+# Data checks:
+cat("rows:", nrow(nypd_clean), " incidents:", n_distinct(nypd_clean$incident_key), "\n")
+
+print(range(nypd_clean$date))
+
+print(colSums(is.na(nypd_clean)))
+
+
+```
+
+## Visualization 1
+
+We want to see the trend of shooting incidents' victims number across the timeline we have.
+The data will be aggregated by month; approximation line will be added as well.
+
+```{r}
+# Monthly aggregated data
+monthly <- nypd_clean |>
+  mutate(month_start = floor_date(date, "month")) |>
+  summarise(victims = n(), .by = month_start)
+
+
+# Plot monthly data:
+ggplot(monthly, aes(month_start, victims)) +
+  geom_line(colour = "grey60") +
+  geom_smooth(method = "loess", span = 0.2, se = FALSE, colour = "red",
+              linewidth = 1, formula = y ~ x) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  labs(title = "NYPD shooting victims per month, 2006-2024",
+       subtitle = "Grey line: monthly values; red: smoothed trend",
+       x = NULL, y = "Victims per month") +
+  theme_minimal()
+
+```
+
+## Visualization 2
+
+We want to know shooting distribution by hour of day (X axis) and day of week (Y axis).
+
+
+```{r}
+
+nypd_clean |>
+  count(wday, hour) |>
+  ggplot(aes(x = hour, y = fct_rev(wday), fill = n)) +
+  geom_tile(colour = "white") +
+  scale_fill_viridis_c(option = "magma", direction = -1, name = "Victims") +
+  scale_x_continuous(breaks = seq(0, 23, 3), expand = c(0, 0)) +
+  labs(title = "NYPD shooting victims by hour and weekday, 2006-2024",
+       x = "Hour of day", y = NULL) +
+  theme_minimal()
+
+```
+
+## Visualization 3
+
+Shooting incidents on the map of New York.
+Not to make the graph too messy, just data for two years were taken - 2023 and 2024.
+Here exactly shooting incidents were counted, not victims (distinct incident_key).
+
+```{r}
+
+
+nypd_clean |>
+  filter(year %in% 2023:2024) |>
+  distinct(incident_key, .keep_all = TRUE) |>
+  drop_na(lat, lon) |>
+  ggplot(aes(lon, lat)) +
+  annotation_map_tile(type = "osm", zoom = 11, quiet = TRUE) +
+  geom_point(colour = "black", size = 0.4, alpha = 0.2) +
+  coord_sf(crs = 4326) +
+  labs(title = "NYPD shooting incidents, 2023-2024",
+       x = NULL, y = NULL) +
+  theme_minimal()
+
+
+```
+
+## Modeling
+
+We'll model the number of deaths because of the shooting incidents per month.
+Every row of the dataset (i.e. every victim) has fatal flag, so we need to count the number of TRUE values there.
+
+Three model will be used for the approximation:
+1) linear regression
+2) polynomial quadratic regression
+3) local smoothing regression.
+All these approximation lines will be shown on a graph with real number of deaths per month.
+
+We model correlates fatal cases with the timeline only (deaths ~ t, where t is the number of the month since beginning of data set - Jan 2006).
+
+```{r}
+# monthly number of deaths (victims with fatal = TRUE); t = number of the month starting from Jan 2006
+monthly_deaths <- nypd_clean |>
+  mutate(month_start = floor_date(date, "month")) |>
+  summarise(deaths = sum(fatal), .by = month_start) |>
+  arrange(month_start) |>
+  mutate(t = row_number())
+
+# models for the analysis
+mod_lin   <- lm(deaths ~ t, data = monthly_deaths)                  # straight line
+mod_quad  <- lm(deaths ~ poly(t, 2), data = monthly_deaths)         # polynomial, quadratic
+mod_loess <- loess(deaths ~ t, data = monthly_deaths, span = 0.2)   # local smoothing
+
+# adding prediction of each model
+monthly_deaths_w_pred <- monthly_deaths |>
+  mutate(linear    = predict(mod_lin),
+         quadratic = predict(mod_quad),
+         loess     = predict(mod_loess))
+
+# Visualization - actual number as dots; predictions are lines
+monthly_deaths_w_pred |>
+  pivot_longer(c(linear, quadratic, loess), names_to = "model", values_to = "fit") |>
+  ggplot() +
+  geom_point(data = monthly_deaths, aes(x = month_start, y = deaths), colour = "grey60") +
+  geom_line(aes(x = month_start, y = fit, colour = model), linewidth = 1) +
+  labs(title = "Monthly deaths from shootings: three fitted models",
+       x = NULL, y = "Deaths per month", colour = "Model") +
+  theme_minimal()
+
+```
+
+
+# Conclusions
+NY Police Department shooting incident data set was used for the analysis. It contains the data about shooting incident victims (one row = one victim) of shooting incidents for 2006 - 2024.
+We did not enrich the dataset with data from other sources. This is the biggest caveat and bias of the analysis - we did not correlate the data with population data.
+
+The analysis includes the following visualizations and modeling:
+
+1) Visualizing number of shooting incident per month for whole time available (Visualization 1). It shows couple of interesting things: 
+(a) there is a clear season pattern of the incident - it looks like summer months have roughly twice as many cases in comparison with winter 
+(b) we can see that number of victims went down since 2013, then decreased even more since 2017; however, 2020 gve us all time highest numbers but later there were two rather sharp decreases again.
+These not smooth changes normally need to be explained, and one of the obvious guess can be measurement biases.
+
+2) Visualization 2 - heat map of number of victims by day of week and time of day. Very interesing graph which shows that Friday and Saturday nights are most dangerous time in New York.
+Potential bias here might be that we did not separate the data by year, so the pattern can be not so clear in reality.
+
+3) Visualization 3 puts shooting incidents on the map of New Your City and shows most dangerous places. To make more practical conclusions one needs to know the city better.
+
+4) We modeled dependency number of fatal cases from date using three different approximation approaches - (a) linear, (b) polynomial and (c) locally estimated scatter plot smoothing (loess).
+Here we have to admit that date as the only independent does not work very good - methods (a) and (b) show just a global trend; approach (c) gives much better result.
+
+
+Summarizing possible biases of the analysis we should mention:
+- data biases: we don't have independent verification of the data provided. Observation of visualization 1 give us some ground to be skeptical here.
+- analyst biases: as we said above there is room for improvement of this work, and probably following iteration(s) would give clearer/better result. Also, because there was not clear goal given, all the exercises here are results of the author's biases.
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+
+```
+
+

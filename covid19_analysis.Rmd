@@ -1,0 +1,283 @@
+---
+title: "Covid19 analysis"
+date: "2026-11-12"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(tidyverse)
+
+```
+
+
+# Covid19 analysis project
+
+For this project will use Covid 19 dataset from Johns Hopkins University
+https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/
+
+Our project is focused on European countries, so just global part of the dataset will be used.
+Also, we use for the analysis just deaths statistics, so from all the covid dataset we load just one file:
+time_series_covid19_deaths_global.csv
+
+Additionally, we use contries population data, mentioned in the lection:
+UID_ISO_FIPS_LookUp_Table.csv
+
+## Analysis plan
+1. Visualization 1: A bar chart of cumulative deaths per million for all 28 European countries with graouping them by region  (Nord, West, South, East).
+2. Visualization 2: Weekly COVID-19 deaths per million for selected European countries to compare the timing and size of the COVID waves.
+3. Visualization 3: Monthly deaths per million for Sweden against its neighbors (Norway, Denmark and Finland) to compare the results of different national approaches.
+4. Model: Linear, polynomial and loess models for monthly deaths per million in Sweden and Norway.
+
+
+
+## Data load and preparation
+
+For the purpose of our analysis, we are going to divide European countries into four categories:
+West, East, Nord and South
+```{r}
+europe <- tribble(
+  ~country,         ~region,
+  "Sweden", "Nord", "Norway", "Nord", "Denmark", "Nord", "Finland", "Nord",
+
+  "United Kingdom", "West", "Ireland", "West", "France", "West", "Belgium", "West",
+  "Netherlands", "West", "Germany", "West", "Austria", "West", "Switzerland", "West",
+
+  "Italy", "South", "Spain", "South", "Portugal", "South", "Greece", "South",
+  
+  "Poland", "East", "Czechia", "East", "Slovakia", "East", "Hungary", "East",
+  "Romania", "East", "Bulgaria", "East", "Slovenia", "East", "Croatia", "East",
+  "Serbia", "East", "Lithuania", "East", "Latvia", "East", "Estonia", "East")
+
+```
+
+
+Reading the data, transforming it using pivot long
+```{r}
+
+# population dataset
+population <- read_csv("UID_ISO_FIPS_LookUp_Table.csv", show_col_types = FALSE) |>
+  filter(is.na(Province_State)) |>
+  select(country = Country_Region, population = Population)
+
+# deaths dataset; using pivot longer, joining it with populations and European regions dictionary
+covid_eu <- read_csv("time_series_covid19_deaths_global.csv", show_col_types = FALSE) |>
+  filter(is.na(`Province/State`), `Country/Region` %in% europe$country) |>
+  select(-c(`Province/State`, Lat, Long)) |>
+  pivot_longer(-`Country/Region`, names_to = "date", values_to = "deaths") |>
+  rename(country = `Country/Region`) |>
+  mutate(date = mdy(date)) |>
+  inner_join(europe, by = "country") |>
+  inner_join(population, by = "country") |>
+  arrange(country, date) |>
+  # daily new deaths; negative values are data corrections, ignore
+  mutate(new_deaths = pmax(deaths - lag(deaths), 0), .by = country) |>
+  select(country, region, date, population, deaths, new_deaths)
+
+# Initial checks
+cat("countries:", n_distinct(covid_eu$country), " rows:", nrow(covid_eu), "\n")
+
+range(covid_eu$date)
+
+colSums(is.na(covid_eu))
+
+covid_eu
+
+```
+
+
+
+## Visualization 1 
+A bar chart of cumulative deaths per million for all 28 European countries with grouping by region (Nord, West, South, East).
+
+
+```{r}
+
+totals <- covid_eu |>
+  filter(date == max(date)) |>
+  mutate(deaths_pm = deaths * 1000000 / population) |>
+  mutate(region_mean = mean(deaths_pm), .by = region) |>
+  mutate(region = factor(region, levels = c("Nord", "West", "South", "East")))
+
+ggplot(totals, aes(x = deaths_pm, y = fct_reorder(country, deaths_pm), fill = region)) +
+  geom_col() +
+  geom_vline(aes(xintercept = region_mean), linetype = "dashed") +
+  geom_text(aes(x = 6600, label = format(deaths, big.mark = ",")), hjust = 1, size = 3) +
+  facet_grid(region ~ ., scales = "free_y", space = "free_y") +
+  scale_x_continuous(limits = c(0, 6700), expand = c(0, 0)) +
+  labs(title = "Cumulative COVID-19 deaths per million",
+       subtitle = "Dashed line - region average; right column - total number of deaths",
+       x = "Deaths per million", y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+```
+The plot clearly shows significant differences in number deaths per million for different regions of Europe:
+East > South > West > North
+
+
+## Visualization 2 
+Weekly COVID-19 deaths per million for selected European countries to compare the timing and size of the COVID waves.
+
+
+```{r}
+
+# weekly deaths per million
+weekly <- covid_eu |>
+  mutate(week = floor_date(date, "week", week_start = 1)) |>
+  summarise(deaths_pm = sum(new_deaths, na.rm = TRUE) * 1000000 / first(population),
+            days = n(), .by = c(country, region, week)) |>
+  filter(days == 7)
+
+# countries for the analysis
+sel_countries <- c("Norway", "Sweden",            # row 1: Nord
+                   "Germany", "United Kingdom",   # row 2: West
+                   "Italy", "Spain",              # row 3: South
+                   "Bulgaria", "Poland")          # row 4: East
+
+# total deaths for selected countries
+totals_sel <- covid_eu |>
+  filter(date == max(date), country %in% sel_countries) |>
+  mutate(country = factor(country, levels = sel_countries),
+         label = paste0("Total: ", format(round(deaths * 1000000 / population), big.mark = ","), " per million"))
+
+# plot
+weekly |>
+  filter(country %in% sel_countries) |>
+  mutate(country = factor(country, levels = sel_countries)) |>
+  ggplot(aes(week, deaths_pm)) +
+  geom_line(colour = "red") +
+  geom_text(data = totals_sel, aes(x = as.Date("2023-03-01"), y = 170, label = label),
+            hjust = 1, size = 3, fontface = "bold") +
+  facet_wrap(~ country, ncol = 2) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(title = "Weekly COVID-19 deaths per million, selected European countries",
+       x = NULL, y = "Deaths per million per week") +
+  theme_minimal()
+
+
+```
+
+From this plot an analyst can see how different waves of Covid affected different European countries.
+For instance, Eastern European countries - Bulgaria and Poland - which had significant deadly spikes during Delta wave (Autumn-Winter 21); significant initial spike of April 2020 presents not on every graph; sequence and attenuation of the waves were not the same in the selected counties.
+It can be a good input for anti-covid national strategies analysis.
+
+
+## Visualization 3
+Weekly deaths per million for Sweden against its neighbors (Norway, Denmark and Finland) to compare the results of different national approaches.
+
+
+```{r}
+
+# calculate total number of deaths per million
+nord_totals <- covid_eu |>
+  filter(date == max(date), region == "Nord") |>
+  mutate(label = paste0(country, ": ", format(round(deaths * 1000000 / population), big.mark = ","))) |>
+  select(country, label)
+leg_labels <- setNames(nord_totals$label, nord_totals$country)
+
+covid_eu |>
+  filter(region == "Nord") |>
+  mutate(month = floor_date(date, "month")) |>
+  summarise(deaths_pm = sum(new_deaths, na.rm = TRUE) * 1000000 / first(population),
+            days = n(), .by = c(country, month)) |>
+  filter(days == days_in_month(month)) |>
+  mutate(country = factor(country, levels = c("Sweden", "Norway", "Denmark", "Finland"))) |>
+  ggplot(aes(month, deaths_pm, colour = country, linewidth = country)) +
+  geom_line() +
+  scale_colour_manual(values = c(Sweden = "red", Norway = "blue", Denmark = "black", Finland = "orange"),
+                      labels = leg_labels) +
+  scale_linewidth_manual(values = c(Sweden = 1.2, Norway = 0.8, Denmark = 0.8, Finland = 0.8),
+                         labels = leg_labels) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(title = "Monthly COVID-19 deaths per million: Sweden vs neighbours",
+       subtitle = "Legend: total deaths per million",
+       x = NULL, y = "Deaths per million per month", colour = NULL, linewidth = NULL) +
+  theme_minimal()
+
+```
+
+We remember that Sweden relied mostly on recommendations instead of strict lockdowns during the pandemic, that's why it was interesting to compare it with its neighbor countries.
+There are numerous other differences between the countries, however "the deadly score" of Sweden was significantly higher than other Nordic countries.
+
+
+
+## Modelling 
+Linear, polynomial (quadratic) and loess models for monthly deaths per million in Sweden and Norway to compare approximations of Covid waves
+
+
+```{r}
+
+# monthly deaths per million for Sweden and Norway; t = month number (1 = Feb 2020)
+monthly <- covid_eu |>
+  filter(country %in% c("Sweden", "Norway")) |>
+  mutate(month = floor_date(date, "month")) |>
+  summarise(deaths_pm = sum(new_deaths, na.rm = TRUE) * 1000000 / first(population),
+            days = n(), .by = c(country, month)) |>
+  filter(days == days_in_month(month)) |>
+  arrange(country, month) |>
+  mutate(t = row_number(), .by = country)
+
+
+# three models, fitted separately for each country (.by = country)
+monthly_pred <- monthly |>
+  mutate(linear    = predict(lm(deaths_pm ~ t)),
+         quadratic = predict(lm(deaths_pm ~ poly(t, 2))),
+         loess     = predict(loess(deaths_pm ~ t, span = 0.3)),
+         .by = country)
+
+# R-squared of each model
+monthly_pred |>
+  summarise(across(c(linear, quadratic, loess),
+                   \(f) 1 - sum((deaths_pm - f)^2) / sum((deaths_pm - mean(deaths_pm))^2)),
+            .by = country)
+
+# actual values are dots, fitted models are lines
+monthly_pred |>
+  pivot_longer(c(linear, quadratic, loess), names_to = "model", values_to = "fit") |>
+  ggplot(aes(x = month)) +
+  geom_point(aes(y = deaths_pm), colour = "grey60") +
+  geom_line(aes(y = fit, colour = model), linewidth = 1) +
+  facet_wrap(~ country, ncol = 1) +
+  labs(title = "Monthly COVID-19 deaths per million: three fitted models",
+       x = NULL, y = "Deaths per million per month", colour = "Model") +
+  theme_minimal()
+
+```
+
+Similar to NYPD shooting analysis, we can say that linear and quadratic models does not give a good approximation for two variables to describe the time trend of monthly deaths. Locally estimated scatter plot smoothing (loess) gave a better approximation, especially for Sweden, which statistics is more curvy.
+
+
+
+## Conclusions
+The Johns Hopkins University COVID-19 dataset was used for the analysis. Data on COVID-19 deaths in European countries was used as follows:
+
+
+1. We joined the dataset with population data for each country and derived the main variable for the analysis: the number of deaths per 1,000,000 people.
+2. Visualization 1 clearly shows that the countries' numbers vary and correlate quite well with a division of the countries into four groups: Eastern, Southern, Western, and Northern Europe.
+3. Visualization 2 compares time series from eight countries and shows that both a general trend and local patterns are present.
+4. Visualization 3 displays time series for Sweden and its Nordic neighbors. Sweden was chosen because it did not impose strict quarantine rules during COVID-19. We can see how Sweden's metric differs from those of the other Nordic countries.
+5. Finally, we used different models to examine the time trend of monthly deaths.
+
+
+Potential limitations and biases of the analysis:
+
+- We do not own the dataset, so we cannot control or even evaluate its quality. The dataset contains negative numbers of deaths, which indicate data corrections. We ignored these values in the time series analysis, which adds an error to our numbers.
+- Even though the graphs show some patterns and trends rather clearly, we need to keep in mind that the graphs do not show the reasons behind them. Explaining these would require a deeper analysis of national parameters and policies.
+
+
+
+
+## Session Info
+
+```{r}
+sessionInfo()
+```
+
+
